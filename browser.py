@@ -1,37 +1,33 @@
 """
-浏览器控制模块 - 通过 Playwright 直连 Chrome，读取 DOM 并自动答题
+浏览器控制模块 - Playwright CDP 连接已有浏览器，注入JS提取DOM题目、点击选项
 """
 import re
-import time
 import asyncio
 
 
 class BrowserController:
-    """Playwright 浏览器控制器"""
+    """Playwright 浏览器控制器：连接→提取→点击"""
 
     def __init__(self, config: dict):
         self.cdp_url = config.get("cdp_url", "http://localhost:9222")
         self.exam_url_pattern = config.get("exam_url_pattern", "yuketang.cn/exam")
-        self.question_selector = config.get("question_selector", "")
-        self.option_selector = config.get("option_selector", "")
-        self.next_selector = config.get("next_selector", "")
         self._playwright = None
         self._browser = None
         self._page = None
+        self._all_questions = []
+        self._current_index = 0
 
     async def connect(self):
-        """连接到已有浏览器（需先用 --remote-debugging-port=9222 启动浏览器）"""
+        """通过CDP连接到已有浏览器实例"""
         from playwright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
         try:
             self._browser = await self._playwright.chromium.connect_over_cdp(self.cdp_url)
             print(f"[+] 已连接到浏览器 (CDP: {self.cdp_url})")
-        except Exception as e:
-            # 不要在这里 stop playwright，外层会处理
+        except Exception:
             raise
 
-        # 找到考试页面
         await self._find_exam_page()
         return self._page is not None
 
@@ -46,7 +42,6 @@ class BrowserController:
                     print(f"[+] 找到考试页面: {page.url[:80]}")
                     return
 
-        # 没找到，列出所有页面让用户选
         print("[!] 未自动匹配到考试页面，当前打开的标签页:")
         all_pages = []
         for ctx in contexts:
@@ -58,219 +53,319 @@ class BrowserController:
             self._page = all_pages[idx]
             await self._page.bring_to_front()
 
-    async def extract_question(self) -> dict:
-        """
-        从 DOM 中提取题目内容
-        返回: {"text": "完整题面", "options": [{"label": "A", "text": "...", "element": ...}], "type": "..."}
-        """
+    # ==================== 题目提取 ====================
+
+    async def extract_all_questions(self) -> list:
+        """从.subject-item容器逐个解析所有题目，缓存并返回"""
+        if self._all_questions:
+            return self._all_questions
         if not self._page:
+            return []
+
+        self._all_questions = await self._page.evaluate(self._EXTRACT_SCRIPT)
+
+        if self._all_questions:
+            print(f"[+] 从页面提取到 {len(self._all_questions)} 道题目")
+            type_counts = {}
+            for q in self._all_questions:
+                t = q.get("type", "unknown")
+                type_counts[t] = type_counts.get(t, 0) + 1
+            print(f"    题型分布: {type_counts}")
+        else:
+            print("[!] 未能从页面提取到任何题目")
+
+        return self._all_questions
+
+    async def scroll_to_question(self, index: int) -> dict:
+        """滚动到第index题，返回缓存中的题目dict"""
+        if index >= len(self._all_questions):
             return {}
 
-        content = await self._page.evaluate(self._EXTRACT_SCRIPT)
-        if not content or not content.get("text"):
-            return {}
+        await self._page.evaluate(f"""
+            () => {{
+                const items = document.querySelectorAll('.exam-main--content .subject-item');
+                if (items[{index}]) {{
+                    items[{index}].scrollIntoView({{block: 'center'}});
+                }}
+            }}
+        """)
 
-        print(f"  -> 提取到题目: {content['text'][:100]}...")
-        for opt in content.get("options", []):
+        q = self._all_questions[index]
+        print(f"  -> 题目: {q['text'][:100]}...")
+        for opt in q.get("options", []):
             print(f"     {opt['label']}. {opt['text'][:60]}")
-        return content
+        return q
 
-    async def click_option(self, label: str, question_data: dict):
-        """在浏览器中点击指定选项"""
+    # ==================== 点击操作 ====================
+
+    async def click_option(self, label: str, question_data: dict) -> bool:
+        """在浏览器中点击指定选项（5策略逐级兜底）"""
+        if not self._page:
+            return False
+
         options = question_data.get("options", [])
+        qtype = question_data.get("type", "single_choice")
+        qindex = question_data.get("index", self._current_index)
 
-        # 方法1: 用存储的 DOM 路径点击
-        for opt in options:
-            if opt["label"].strip().upper() == label.strip().upper():
-                elem = await self._page.evaluate_handle(
-                    f'document.querySelector("[data-answer-index=\'{opt["index"]}\']")'
-                )
-                if await elem.as_element():
-                    await elem.as_element().click()
-                    print(f"  -> 点击选项 {label}")
-                    return True
+        # 找到label对应的选项在options列表中的索引
+        opt_index = -1
+        label_stripped = label.strip()
+        for i, opt in enumerate(options):
+            if opt["label"].strip().upper() == label_stripped.upper():
+                opt_index = i
+                break
+        # 判断题：把文字答案映射到选项索引
+        if opt_index < 0 and qtype == "true_false":
+            true_vals = {"正确", "对", "TRUE", "T", "Y", "A", "是"}
+            false_vals = {"错误", "错", "FALSE", "F", "N", "B", "否"}
+            if label_stripped in true_vals or label_stripped.upper() in true_vals:
+                for i, opt in enumerate(options):
+                    if opt.get("label", "") in true_vals or opt.get("value", "") == "true":
+                        opt_index = i
+                        break
+            elif label_stripped in false_vals or label_stripped.upper() in false_vals:
+                for i, opt in enumerate(options):
+                    if opt.get("label", "") in false_vals or opt.get("value", "") == "false":
+                        opt_index = i
+                        break
 
-        # 方法2: 用文本匹配点击（兜底）
-        for opt in options:
-            if opt["label"].strip().upper() == label.strip().upper():
-                text = opt.get("text", "")
-                try:
-                    # 用文本内容定位可点击元素
-                    elem = self._page.get_by_text(text, exact=False).first
-                    if elem:
-                        await elem.click()
-                        print(f"  -> 文本匹配点击选项 {label}")
-                        return True
-                except Exception:
-                    pass
+        if opt_index < 0:
+            print(f"[!] 未找到选项 '{label}' 对应的DOM元素")
+            return False
 
-        # 方法3: 用 aria-label 或 title 匹配
-        try:
-            await self._page.click(f'[aria-label*="{label}"]')
+        # 策略1: JS点击.exam-font > li[opt_index]内的radio input
+        clicked = await self._page.evaluate(f"""
+            () => {{
+                const items = document.querySelectorAll('.exam-main--content .subject-item');
+                const item = items[{qindex}];
+                if (!item) return false;
+
+                const lis = item.querySelectorAll('.exam-font li');
+                const li = lis[{opt_index}];
+                if (!li) return false;
+
+                // 点击li内的radio/checkbox input
+                const input = li.querySelector('input[type="radio"], input[type="checkbox"]');
+                if (input) {{
+                    input.click();
+                    input.checked = true;
+                    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    return true;
+                }}
+                return false;
+            }}
+        """)
+
+        if clicked:
+            print(f"  -> 点击选项 {label}")
             return True
-        except Exception:
-            pass
 
-        return False
+        # 策略2: JS点击li本身
+        clicked = await self._page.evaluate(f"""
+            () => {{
+                const items = document.querySelectorAll('.exam-main--content .subject-item');
+                const item = items[{qindex}];
+                if (!item) return false;
+                const lis = item.querySelectorAll('.exam-font li');
+                const li = lis[{opt_index}];
+                if (!li) return false;
+                li.click();
+                return true;
+            }}
+        """)
 
-    async def click_next(self):
-        """点击下一题按钮"""
-        if self.next_selector:
+        if clicked:
+            print(f"  -> 点击li选项 {label}")
+            return True
+
+        # 策略3: JS点击li内的.custom_ueditor_cn_body
+        clicked = await self._page.evaluate(f"""
+            () => {{
+                const items = document.querySelectorAll('.exam-main--content .subject-item');
+                const item = items[{qindex}];
+                if (!item) return false;
+                const lis = item.querySelectorAll('.exam-font li');
+                const li = lis[{opt_index}];
+                if (!li) return false;
+                const body = li.querySelector('.custom_ueditor_cn_body');
+                if (body) {{ body.click(); return true; }}
+                return false;
+            }}
+        """)
+
+        if clicked:
+            print(f"  -> 点击custom_ueditor_cn_body选项 {label}")
+            return True
+
+        # 策略4: 判断题兜底——搜"正确"/"错误"文字点击（适用于无.exam-font的判断题）
+        if qtype == "true_false":
             try:
-                await self._page.click(self.next_selector, timeout=3000)
-                return True
+                item_el = self._page.locator('.exam-main--content .subject-item').nth(qindex)
+                search_text = "正确" if label_stripped in {"正确", "对", "TRUE", "T", "Y", "A", "是"} else "错误"
+                btn = item_el.locator('label, li, span', has_text=search_text).first
+                if await btn.count() > 0:
+                    await btn.click(timeout=3000)
+                    print(f"  -> 判断题兜底点击: {search_text}")
+                    return True
             except Exception:
                 pass
 
-        # 通用匹配
-        next_texts = ["下一题", "下一頁", "next", ">", "提交"]
-        for t in next_texts:
+        # 策略5: Playwright文本匹配点击
+        target_text = options[opt_index].get("text", "")
+        if target_text:
             try:
-                btn = self._page.get_by_text(t, exact=True).first
-                if btn:
-                    await btn.click(timeout=2000)
-                    time.sleep(1)
+                item_el = self._page.locator('.exam-main--content .subject-item').nth(qindex)
+                btn = item_el.locator('li', has_text=target_text).first
+                if await btn.count() > 0:
+                    await btn.click(timeout=3000)
+                    print(f"  -> 文本匹配点击选项 {label}")
                     return True
             except Exception:
-                continue
+                pass
+
         return False
 
-    async def inject_answer_markers(self):
-        """
-        在页面中注入标记，给每个选项加上 data-answer-index 属性，
-        方便后续直接通过索引点击
-        """
-        await self._page.evaluate("""
-        () => {
-            // 清除旧标记
-            document.querySelectorAll('[data-answer-index]').forEach(el => {
-                el.removeAttribute('data-answer-index');
-            });
+    async def click_next(self) -> bool:
+        """移动到下一题：递增索引并滚动"""
+        self._current_index += 1
+        if self._current_index >= len(self._all_questions):
+            print("[*] 已是最后一题")
+            return False
 
-            // 查找所有选项容器并标记
-            const labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
-                           '正确', '错误', '对', '错', 'True', 'False', 'Y', 'N'];
-
-            // 遍历所有可点击元素，寻找选项
-            const allEls = document.querySelectorAll('label, li, div[class*="option"], div[class*="choice"], div[class*="answer"], span[class*="option"]');
-            allEls.forEach(el => {
-                const text = el.textContent?.trim() || '';
-                for (const label of labels) {
-                    if (text.startsWith(label + '.') || text.startsWith(label + '、') ||
-                        text.startsWith(label + ')') || text.startsWith(label + '）') ||
-                        text.startsWith('(' + label + ')') || text === label) {
-                        el.setAttribute('data-answer-index', label);
-                        break;
-                    }
-                }
-            });
-
-            // 如果没找到，尝试找 radio/checkbox 的 label
-            if (document.querySelectorAll('[data-answer-index]').length === 0) {
-                document.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach(input => {
-                    const label = input.closest('label') || input.parentElement;
-                    const text = label?.textContent?.trim() || '';
-                    for (const l of labels) {
-                        if (text.includes(l + '.') || text.includes('(' + l + ')') || text.startsWith(l)) {
-                            label?.setAttribute('data-answer-index', l);
-                            break;
-                        }
-                    }
-                });
-            }
-
-            return document.querySelectorAll('[data-answer-index]').length;
-        }
+        await self._page.evaluate(f"""
+            () => {{
+                const items = document.querySelectorAll('.exam-main--content .subject-item');
+                if (items[{self._current_index}]) {{
+                    items[{self._current_index}].scrollIntoView({{block: 'center'}});
+                }}
+            }}
         """)
+        return True
 
     async def close(self):
+        """释放Playwright连接资源"""
         if self._playwright:
             await self._playwright.stop()
 
-    # ---- DOM 提取脚本 ----
+    # ---- DOM提取JS：逐.subject-item解析 ----
     _EXTRACT_SCRIPT = """
     () => {
-        const result = { text: '', options: [], type: 'single_choice' };
-
-        // ---- 检测题型 ----
-        const body = document.body.innerText || '';
-        if (body.includes('多选题') || body.includes('多选')) result.type = 'multiple_choice';
-        if (body.includes('判断题') || body.includes('判断')) result.type = 'true_false';
-        if (body.includes('填空题') || body.includes('填空')) result.type = 'fill_blank';
-
-        // ---- 提取题目正文 ----
-        // 策略: 找包含题目编号的元素（如 "1."、"第1题"）
-        const allText = document.body.innerText || '';
-
-        // 尝试找最可能包含题目的容器
-        let contentArea = document.querySelector('.exam-main--content')
-            || document.querySelector('[class*="exam-content"]')
-            || document.querySelector('[class*="question"]')
-            || document.querySelector('main')
-            || document.querySelector('article')
-            || document.body;
-
-        result.text = (contentArea.innerText || allText).substring(0, 2000);
-
-        // ---- 提取选项 ----
-        const labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-        const optionPatterns = [];
-        for (const label of labels) {
-            optionPatterns.push(
-                label + '.', label + '、', label + ')', label + '）',
-                '(' + label + ')', ' ' + label + ' ', label + '．'
-            );
+        const questions = [];
+        const container = document.querySelector('.exam-main--content');
+        if (!container) {
+            console.log('[extract] 未找到 .exam-main--content');
+            return questions;
         }
 
-        // 在正文中按模式拆分选项
-        let lastIdx = -1;
-        let lastLabel = '';
-        for (const pattern of optionPatterns) {
-            const idx = result.text.indexOf(pattern);
-            if (idx > 0 && (lastIdx < 0 || idx < lastIdx)) {
-                lastIdx = idx;
-                lastLabel = pattern[0];
-            }
-        }
+        const items = container.querySelectorAll('.subject-item');
+        console.log('[extract] 找到', items.length, '个 .subject-item');
 
-        if (lastIdx > 0) {
-            // 题目正文在第一个选项之前
-            const questionText = result.text.substring(0, lastIdx).trim();
+        const LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
-            // 如果是判断题
-            if (/[是正][确確]|[错误]|[对錯]|[TF]|true|false/i.test(questionText)) {
-                result.type = 'true_false';
-            }
-
-            // 拆分选项
-            const optionsText = result.text.substring(lastIdx);
-            const parts = optionsText.split(/([A-H][.、)）．])/);
-            let currentLabel = '';
-            for (const part of parts) {
-                const stripped = part.trim();
-                if (labels.includes(stripped[0]) && stripped.length <= 2) {
-                    currentLabel = stripped[0];
-                } else if (currentLabel && stripped) {
-                    result.options.push({
-                        label: currentLabel,
-                        text: stripped.substring(0, 200)
-                    });
-                    currentLabel = '';
+        items.forEach((item, itemIdx) => {
+            // ---- 题型检测：从 .item-type 读取 ----
+            let qtype = 'single_choice';
+            const typeEl = item.querySelector('.item-type');
+            const typeText = typeEl ? (typeEl.textContent || '').trim() : '';
+            if (typeText) {
+                if (typeText.includes('判断')) {
+                    qtype = 'true_false';
+                } else if (typeText.includes('多选')) {
+                    qtype = 'multiple_choice';
+                } else if (typeText.includes('填空')) {
+                    qtype = 'fill_blank';
+                } else if (typeText.includes('单选')) {
+                    qtype = 'single_choice';
                 }
             }
-        }
 
-        // 如果没找到字母选项，尝试判断题格式
-        if (result.options.length === 0) {
-            if (result.text.includes('正确') || result.text.includes('错误') || result.text.includes('对') || result.text.includes('错')) {
-                result.type = 'true_false';
-                result.options = [
-                    { label: 'A', text: '正确' },
-                    { label: 'B', text: '错误' }
-                ];
+            // ---- 题面：从 h4 读取 ----
+            const h4 = item.querySelector('h4');
+            let questionText = h4 ? h4.textContent.trim() : '';
+
+            // ---- 选项：从 .exam-font > li 读取 ----
+            const options = [];
+            const examFont = item.querySelector('.exam-font');
+            if (examFont) {
+                const lis = examFont.querySelectorAll('li');
+                if (lis.length) {
+                    console.log('[extract] 第' + (itemIdx+1) + '题 找到.exam-font, ' + lis.length + '个li');
+                }
+                lis.forEach((li, liIdx) => {
+                    // 优先读.custom_ueditor_cn_body，兜底读li全文
+                    const body = li.querySelector('.custom_ueditor_cn_body');
+                    const text = body
+                        ? body.textContent.trim()
+                        : li.textContent.trim();
+
+                    // 查radio/checkbox input的value
+                    const input = li.querySelector('input[type="radio"], input[type="checkbox"]');
+                    const val = input ? (input.value || '') : '';
+
+                    const label = liIdx < LABELS.length ? LABELS[liIdx] : String(liIdx);
+
+                    if (text) {
+                        options.push({
+                            label: label,
+                            text: text,
+                            value: val
+                        });
+                    }
+                });
+            } else {
+                console.log('[extract] 第' + (itemIdx+1) + '题 未找到.exam-font');
             }
-        }
 
-        return result;
+            // ---- 兜底：无.exam-font时通过radio/checkbox推断选项 ----
+            if (options.length === 0) {
+                const radios = item.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+                if (radios.length >= 2) {
+                    console.log('[extract] 第' + (itemIdx+1) + '题 兜底: 找到' + radios.length + '个radio/checkbox');
+                    radios.forEach((r, ri) => {
+                        const label = ri < LABELS.length ? LABELS[ri] : String(ri);
+                        const parentLi = r.closest('li');
+                        const parentText = parentLi ? parentLi.textContent.trim() : '';
+                        // 从父元素文本中去掉input本身
+                        const text = parentText || (r.value === 'true' ? '正确' : r.value === 'false' ? '错误' : r.value);
+                        options.push({
+                            label: label,
+                            text: text,
+                            value: r.value || ''
+                        });
+                    });
+                } else if (qtype === 'true_false') {
+                    // 判断题完全无选项元素，构造虚拟选项
+                    options.push(
+                        { label: 'A', text: '正确', value: 'true' },
+                        { label: 'B', text: '错误', value: 'false' }
+                    );
+                }
+            }
+
+            if (questionText && options.length > 0) {
+                console.log('[extract] 第' + (itemIdx+1) + '题 type=' + qtype + ' opts=' + options.length);
+                questions.push({
+                    text: questionText,
+                    type: qtype,
+                    options: options,
+                    index: itemIdx
+                });
+            } else if (questionText && qtype === 'fill_blank') {
+                // 填空题无选项是正常的
+                console.log('[extract] 第' + (itemIdx+1) + '题 type=fill_blank (无选项)');
+                questions.push({
+                    text: questionText,
+                    type: qtype,
+                    options: [],
+                    index: itemIdx
+                });
+            } else {
+                console.log('[extract] 跳过第' + (itemIdx+1) + '题 text=' + !!questionText + ' opts=' + options.length);
+            }
+        });
+
+        console.log('[extract] 共提取', questions.length, '道题目');
+        return questions;
     }
     """

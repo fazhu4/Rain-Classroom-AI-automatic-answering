@@ -1,0 +1,37 @@
+# ===========================================
+# 网课自动答题脚本配置
+# ===========================================
+
+# ---- LLM API 配置 ----
+llm:
+  # 模型提供商: openai / anthropic / custom
+  provider: openai
+
+  # API 密钥（必填）
+  api_key: "sk-03dd531ed2c94ea38a9ccbc73902dd7f"
+
+  # 模型名称
+  model: "deepseek-v4-flash"
+
+  # 自定义 API 地址（仅 provider=custom 时生效，OpenAI 兼容格式）
+  base_url: "https://api.deepseek.com"
+
+  # 请求参数
+  max_tokens: 2000
+  temperature: 0.1
+
+# ---- 浏览器模式配置 ----
+browser:
+  # 浏览器类型: edge / chrome
+  browser_type: edge
+
+  # 远程调试地址（启动浏览器后默认 http://localhost:9222）
+  cdp_url: "http://localhost:9222"
+
+  # 考试页面的 URL 匹配规则（用于自动定位考试标签页）
+  exam_url_pattern: "yuketang.cn/exam"
+
+# ---- 自动化配置 ----
+automation:
+  # 点击后延迟（秒）
+  click_delay: 0.5
