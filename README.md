@@ -1,6 +1,24 @@
 # 网课自动答题脚本
 
-浏览器直连 + 大模型 API，自动读取考试页面题目并作答。
+通过 Playwright CDP 协议连接本地浏览器，从考试页面 DOM 中提取题目，发送给大模型 API 作答，再将答案自动点击回页面。
+
+## 工作原理
+
+```
+浏览器(CDP) → 注入JS提取DOM题目 → 分题型构建Prompt → LLM作答 → 浏览器内点击选项 → 下一题
+```
+
+1. 连接到用户已打开的浏览器（CDP协议，端口9222）
+2. 在所有标签页中自动匹配考试页面（URL匹配 `yuketang.cn/exam`）
+3. 注入JS脚本一次性提取页面上所有题目（题面 + 题型 + 选项），缓存到内存
+4. 逐题循环：滚动到题目 → 根据题型（单选/多选/判断/填空）构建不同的LLM提示词 → 调用大模型API → 解析返回的JSON答案 → 在浏览器中点击对应选项 → 翻到下一题
+5. 全部答完或用户按 `Ctrl+C` 后释放资源退出
+
+## 环境要求
+
+- Python 3.9+
+- Edge 或 Chrome 浏览器
+- 大模型 API Key（支持 OpenAI / Anthropic / DeepSeek 等 OpenAI 兼容接口）
 
 ## 快速开始
 
@@ -8,70 +26,193 @@
 
 ```powershell
 pip install -r requirements.txt
+playwright install chromium
 ```
 
 ### 2. 配置 API
 
-编辑 `config.yaml`，填入大模型 API Key：
+编辑 `config.yaml`，填入大模型 API Key 和模型信息：
 
 ```yaml
 llm:
-  provider: openai          # openai / anthropic / custom
-  api_key: "sk-xxx"         # 你的 API Key
-  model: "deepseek-chat"    # 模型名
-  base_url: ""              # 自定义 API 地址（DeepSeek 填 https://api.deepseek.com/v1）
+  provider: openai              # 模型提供商：openai / anthropic / custom
+  api_key: "sk-你的API-Key"     # API 密钥（必填）
+  model: "deepseek-v4-flash"     # 模型名称
+  base_url: "https://api.deepseek.com"  # 自定义API地址（使用DeepSeek等第三方时填写）
+  max_tokens: 2000              # 最大输出token数
+  temperature: 0.1              # 生成温度，0.1接近确定性输出
+
+browser:
+  browser_type: edge            # 浏览器类型：edge / chrome
+  cdp_url: "http://localhost:9222"  # CDP调试地址
+  exam_url_pattern: "yuketang.cn/exam"  # 考试页面URL匹配规则
+
+automation:
+  click_delay: 0.5              # 点击选项前的延迟（秒）
 ```
+
+> **注意**：`base_url` 不需要带 `/v1` 后缀，OpenAI SDK 会自动拼接 `/v1/chat/completions`。
 
 ### 3. 启动浏览器调试模式
 
-> Edge 有后台常驻进程，必须彻底关闭后再启动，否则端口不会监听。
+> Edge 有后台常驻进程，端口被占用会导致连接失败，必须彻底关闭后再启动。
 
-**Windows：**
-1. 关闭所有 Edge 窗口
-2. `Ctrl+Shift+Esc` → 搜索 `msedge` → 结束所有残留进程
-3. `Win+R` → 输入：`msedge.exe --remote-debugging-port=9222`
-4. 验证：浏览器打开 `http://localhost:9222/json`，能看到 JSON 说明成功
+**步骤：**
+1. 关闭所有 Edge/Chrome 窗口
+2. `Ctrl+Shift+Esc` 打开任务管理器 → 搜索 `msedge` 或 `chrome` → 结束所有残留进程
+3. `Win+R` 运行：
+   - Edge：`msedge.exe --remote-debugging-port=9222`
+   - Chrome：`chrome.exe --remote-debugging-port=9222`
+4. 验证端口是否监听：浏览器打开 `http://localhost:9222/json`，能看到页面列表的 JSON 数据说明成功
+5. 在新启动的浏览器中打开考试页面并登录
 
-**Chrome 同理：** `chrome.exe --remote-debugging-port=9222`
-
-### 4. 运行
+### 4. 运行脚本
 
 ```powershell
-# 激活 venv（如果有）
-.\.venv\Scripts\Activate.ps1
-
-# 启动脚本
 python main.py
 ```
 
-切到考试页面，按 **`Ctrl+Shift+A`** 触发答题，**`Ctrl+Shift+Q`** 退出。
+脚本启动后会自动：
+- 连接到浏览器的 CDP 调试端口
+- 在所有标签页中匹配考试页面
+- 提取所有题目并开始逐题作答
 
-## 两种模式
+按 `Ctrl+C` 可随时终止程序。
 
-| 模式 | 配置 | 原理 | 优点 | 缺点 |
-|------|------|------|------|------|
-| **浏览器模式**（推荐） | `mode: browser` | Playwright 连浏览器 CDP，读 DOM 文本 → LLM → 浏览器内点击 | 精准、便宜、无 OCR 误差 | 需启动浏览器调试端口 |
-| 截图模式 | `mode: screenshot` | mss 截图 → EasyOCR 识别 → LLM → pyautogui 模拟点击 | 无需浏览器配置 | OCR 可能识别错误、贵 |
+## 配置详解
+
+### LLM 配置 (`llm` 段)
+
+| 字段 | 说明 | 示例值 |
+|------|------|--------|
+| `provider` | 模型提供商 | `openai` / `anthropic` / `custom` |
+| `api_key` | API 密钥 | `sk-xxx` |
+| `model` | 模型名称 | `gpt-4o` / `deepseek-v4-flash` / `claude-sonnet-4-6` |
+| `base_url` | 自定义API地址（仅 `custom` 或使用第三方OpenAI兼容服务时填写） | `https://api.deepseek.com` |
+| `max_tokens` | 单次回复最大 token 数 | `2000` |
+| `temperature` | 生成温度（0=确定，1=随机） | `0.1` |
+
+**各 provider 配置示例：**
+
+- **OpenAI 官方：**
+  ```yaml
+  provider: openai
+  api_key: "sk-xxx"
+  model: "gpt-4o"
+  base_url: ""   # 留空即用官方地址
+  ```
+
+- **DeepSeek：**
+  ```yaml
+  provider: openai          # 或 custom，两者等效
+  api_key: "sk-xxx"
+  model: "deepseek-v4-flash"
+  base_url: "https://api.deepseek.com"
+  ```
+
+- **Anthropic Claude：**
+  ```yaml
+  provider: anthropic
+  api_key: "sk-ant-xxx"
+  model: "claude-sonnet-4-6"
+  base_url: ""   # Anthropic 使用官方SDK，无需base_url
+  ```
+
+- **其他 OpenAI 兼容服务（Ollama / vLLM 等）：**
+  ```yaml
+  provider: custom
+  api_key: "not-needed"
+  model: "llama3"
+  base_url: "http://localhost:11434"
+  ```
+
+### 浏览器配置 (`browser` 段)
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `browser_type` | 浏览器类型 | `edge` |
+| `cdp_url` | CDP 远程调试地址 | `http://localhost:9222` |
+| `exam_url_pattern` | 考试页面URL匹配规则（正则） | `yuketang.cn/exam` |
+
+### 自动化配置 (`automation` 段)
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `click_delay` | 点击选项前等待时间（秒） | `0.5` |
+
+## 支持的题型
+
+脚本会自动从页面的 `.item-type` 元素检测题型，针对不同题型使用不同的 LLM 提示词策略：
+
+| 题型 | 检测关键词 | LLM提示词策略 | 答案格式 |
+|------|-----------|-------------|---------|
+| 单选题 | 单选 | 发送题目文字 + 全部选项 | 单个字母，如 `A` |
+| 多选题 | 多选 | 发送题目文字 + 全部选项 | 多个字母连写，如 `ABD` |
+| 判断题 | 判断 | 仅发送题目文字，告知 A=正确 B=错误 | 单个字母 `A` 或 `B` |
+| 填空题 | 填空 | 仅发送题目文字 | 填空答案文字 |
+
+## 选项点击策略
+
+为防止页面DOM结构差异导致点击失败，脚本使用5层兜底策略依次尝试点击答案选项：
+
+| 策略 | 方式 | 适用场景 |
+|------|------|---------|
+| 1 | JS点击 radio/checkbox input + 派发事件 | Vue/React等框架的响应式组件 |
+| 2 | JS直接点击 li 元素 | 事件绑定在li上的页面 |
+| 3 | JS点击 .custom_ueditor_cn_body | 雨课堂等使用富文本编辑器的平台 |
+| 4 | 判断题文字搜索 | 判断题DOM结构不规范的页面 |
+| 5 | Playwright文本匹配 | 以上策略均失败时的通用兜底 |
+
+## 文件结构
+
+```
+auto/
+├── config.yaml       # 用户配置文件（API Key、浏览器类型等）
+├── main.py           # 主入口：加载配置 → 校验API Key → 启动答题循环
+├── browser.py        # 浏览器控制：CDP连接 → DOM提取 → 选项点击 → 翻题
+├── llm_client.py     # LLM客户端：统一封装 OpenAI / Anthropic / 自定义API
+├── requirements.txt  # Python 依赖
+└── README.md         # 本文件
+```
+
+### 各模块职责
+
+- **`main.py`** — 程序入口和答题流程编排。加载配置、校验API Key、创建浏览器控制器和LLM客户端，运行异步答题主循环（连接→提取→逐题作答→清理）。
+- **`browser.py`** — 浏览器自动化层。通过 Playwright CDP 连接到用户浏览器，注入JS脚本从 `.subject-item` 容器提取题目结构化数据，提供5层兜底点击策略将答案填回页面。
+- **`llm_client.py`** — 大模型API客户端。统一 OpenAI 和 Anthropic 两种SDK的调用接口，自动解析LLM返回的JSON（支持3层解析兜底：直接解析→去markdown标记→正则匹配）。
+- **`config.yaml`** — 用户配置文件。包含LLM API密钥、模型选择、浏览器类型、自动化参数等所有可配置项。
+- **`requirements.txt`** — Python依赖清单。包含 openai、anthropic、pyyaml、playwright 四个核心依赖。
 
 ## 常见问题
 
 ### Edge 连接失败 `ECONNREFUSED`
 
-- 确认 Edge 已彻底关闭（任务管理器杀残留进程）
-- 确认启动命令带了 `--remote-debugging-port=9222`
-- 用 `http://localhost:9222/json` 验证端口是否监听
+- 确认 Edge 已彻底关闭（任务管理器搜索 `msedge`，结束所有残留进程）
+- 确认启动命令带了 `--remote-debugging-port=9222` 参数
+- 用浏览器打开 `http://localhost:9222/json` 验证端口是否在监听
+- 如果返回 JSON 数据说明端口正常；如果无法访问说明端口未开启
 
-### 热键没反应
+### 未能自动匹配到考试页面
 
-- 终端窗口必须在最前面才能捕获热键
-- 如果用了管理员权限运行终端，脚本也需要管理员权限
+- 确认考试页面已经在调试模式启动的浏览器中打开
+- 确认 `exam_url_pattern` 配置正确（默认识别 `yuketang.cn/exam`）
+- 程序会列出所有打开的标签页，可以手动输入序号选择目标页面
+
+### 题目提取不完整
+
+- 脚本通过 `.exam-main--content .subject-item` 选择器提取题目
+- 如果发现某些题目未被提取，可能是页面结构不匹配
+- 可修改 `browser.py` 中 `_EXTRACT_SCRIPT` 的 CSS 选择器适配特定平台
 
 ### DeepSeek API 报错
 
-- `provider` 设为 `openai` 或 `custom` 都可以
-- `base_url` 必须带 `/v1`：`https://api.deepseek.com/v1`
-- `model` 填 `deepseek-chat`
+- `provider` 设为 `openai` 或 `custom` 均可
+- `base_url` 填 `https://api.deepseek.com`（不需要带 `/v1`，SDK会自动拼接）
+- `model` 填正确的模型名，如 `deepseek-v4-flash`、`deepseek-chat` 等
 
-### OCR 加载很慢
+### 点击不生效
 
-首次运行 EasyOCR 会自动下载模型文件（~200MB），等待一次即可。
+脚本内置5层点击兜底策略，正常情况下至少有一种能生效。如果全部失败：
+- 检查浏览器页面是否在前台可见
+- 检查页面DOM结构是否与预期差异较大
+- 查看控制台输出的错误信息定位具体原因

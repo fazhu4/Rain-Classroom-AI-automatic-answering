@@ -1,12 +1,4 @@
-mss>=9.0.0
-pillow>=10.0.0
-pyautogui>=0.9.54
-pyperclip>=1.8.0
 openai>=1.0.0
 anthropic>=0.30.0
-easyocr>=1.7.0
-opencv-python>=4.8.0
-pynput>=1.7.0
 pyyaml>=6.0
-numpy>=1.24.0
 playwright>=1.40.0
