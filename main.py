@@ -9,6 +9,8 @@ import yaml
 from pathlib import Path
 from typing import Optional
 
+from sympy.parsing.sympy_parser import null
+
 from llm_client import LLMClient
 
 
@@ -48,7 +50,7 @@ class AutoAnswer:
     def run(self):
         # 读取 api_key 字段，检查是否填写了有效的 Key
         api_key = self.config["llm"].get("api_key", "")
-        if not api_key or "your-api-key" in api_key:
+        if api_key  is null:
             print("[!] 请先在 config.yaml 中填入你的 API Key")
             sys.exit(1)  # 未配置Key直接退出
 

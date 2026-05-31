@@ -17,7 +17,7 @@
 ## 环境要求
 
 - Python 3.9+
-- Edge 或 Chrome 浏览器
+- Edge 浏览器
 - 大模型 API Key（支持 OpenAI / Anthropic / DeepSeek 等 OpenAI 兼容接口）
 
 ## 快速开始
@@ -26,7 +26,6 @@
 
 ```powershell
 pip install -r requirements.txt
-playwright install chromium
 ```
 
 ### 2. 配置 API
@@ -43,7 +42,7 @@ llm:
   temperature: 0.1              # 生成温度，0.1接近确定性输出
 
 browser:
-  browser_type: edge            # 浏览器类型：edge / chrome
+  browser_type: edge            # 浏览器类型：edge
   cdp_url: "http://localhost:9222"  # CDP调试地址
   exam_url_pattern: "yuketang.cn/exam"  # 考试页面URL匹配规则
 
@@ -58,11 +57,9 @@ automation:
 > Edge 有后台常驻进程，端口被占用会导致连接失败，必须彻底关闭后再启动。
 
 **步骤：**
-1. 关闭所有 Edge/Chrome 窗口
-2. `Ctrl+Shift+Esc` 打开任务管理器 → 搜索 `msedge` 或 `chrome` → 结束所有残留进程
-3. `Win+R` 运行：
-   - Edge：`msedge.exe --remote-debugging-port=9222`
-   - Chrome：`chrome.exe --remote-debugging-port=9222`
+1. 关闭所有 Edge 窗口
+2. `Ctrl+Shift+Esc` 打开任务管理器 → 搜索 `msedge` → 结束所有残留进程
+3. `Win+R` 运行：`msedge.exe --remote-debugging-port=9222`
 4. 验证端口是否监听：浏览器打开 `http://localhost:9222/json`，能看到页面列表的 JSON 数据说明成功
 5. 在新启动的浏览器中打开考试页面并登录
 

@@ -89,7 +89,7 @@ class BrowserController:
     # 一次性注入 JS 脚本到考试页面，从 DOM 中提取所有题目的结构化数据，并缓存。
     # 每个题目 dict 包含：
     #     text:    题面文字（str）
-    #     type:   题型（str） single_choice / multiple_choice / true_false / fill_blank
+    #     -type:   题型（str） single_choice / multiple_choice / true_false / fill_blank
     #     options: 选项列表（list[dict]），每个选项含 label、text、value
     #     index:   在页面中的序号（int，从0开始）
     # Returns: list[dict] — 所有题目的结构化数据列表
