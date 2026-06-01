@@ -2,23 +2,13 @@
 
 通过 Playwright CDP 协议连接本地浏览器，从考试页面 DOM 中提取题目，发送给大模型 API 作答，再将答案自动点击回页面。
 
-## 工作原理
-
-```
-浏览器(CDP) → 注入JS提取DOM题目 → 分题型构建Prompt → LLM作答 → 浏览器内点击选项 → 下一题
-```
-
-1. 连接到用户已打开的浏览器（CDP协议，端口9222）
-2. 在所有标签页中自动匹配考试页面（URL匹配 `yuketang.cn/exam`）
-3. 注入JS脚本一次性提取页面上所有题目（题面 + 题型 + 选项），缓存到内存
-4. 逐题循环：滚动到题目 → 根据题型（单选/多选/判断/填空）构建不同的LLM提示词 → 调用大模型API → 解析返回的JSON答案 → 在浏览器中点击对应选项 → 翻到下一题
-5. 全部答完或用户按 `Ctrl+C` 后释放资源退出
+有无法解决的问题联系我，主页有联系方式
 
 ## 环境要求
 
-- Python 3.9+
+- Python 3.9+ （没有在）
 - Edge 浏览器
-- 大模型 API Key（支持 OpenAI / Anthropic / DeepSeek 等 OpenAI 兼容接口）
+- 大模型 API Key （我使用的是deepseek，只支持文本输入，所以没做图片传输，也太麻烦了，有图片的题目自己做一下就好了）
 
 ## 快速开始
 
@@ -31,26 +21,14 @@ pip install -r requirements.txt
 ### 2. 配置 API
 
 编辑 `config.yaml`，填入大模型 API Key 和模型信息：
-
+使用deepseek的话直接将项目里的api_key换成你的就可以了
 ```yaml
 llm:
   provider: openai              # 模型提供商：openai / anthropic / custom
   api_key: "sk-你的API-Key"     # API 密钥（必填）
   model: "deepseek-v4-flash"     # 模型名称
   base_url: "https://api.deepseek.com"  # 自定义API地址（使用DeepSeek等第三方时填写）
-  max_tokens: 2000              # 最大输出token数
-  temperature: 0.1              # 生成温度，0.1接近确定性输出
-
-browser:
-  browser_type: edge            # 浏览器类型：edge
-  cdp_url: "http://localhost:9222"  # CDP调试地址
-  exam_url_pattern: "yuketang.cn/exam"  # 考试页面URL匹配规则
-
-automation:
-  click_delay: 0.5              # 点击选项前的延迟（秒）
 ```
-
-> **注意**：`base_url` 不需要带 `/v1` 后缀，OpenAI SDK 会自动拼接 `/v1/chat/completions`。
 
 ### 3. 启动浏览器调试模式
 
@@ -89,39 +67,6 @@ python main.py
 | `max_tokens` | 单次回复最大 token 数 | `2000` |
 | `temperature` | 生成温度（0=确定，1=随机） | `0.1` |
 
-**各 provider 配置示例：**
-
-- **OpenAI 官方：**
-  ```yaml
-  provider: openai
-  api_key: "sk-xxx"
-  model: "gpt-4o"
-  base_url: ""   # 留空即用官方地址
-  ```
-
-- **DeepSeek：**
-  ```yaml
-  provider: openai          # 或 custom，两者等效
-  api_key: "sk-xxx"
-  model: "deepseek-v4-flash"
-  base_url: "https://api.deepseek.com"
-  ```
-
-- **Anthropic Claude：**
-  ```yaml
-  provider: anthropic
-  api_key: "sk-ant-xxx"
-  model: "claude-sonnet-4-6"
-  base_url: ""   # Anthropic 使用官方SDK，无需base_url
-  ```
-
-- **其他 OpenAI 兼容服务（Ollama / vLLM 等）：**
-  ```yaml
-  provider: custom
-  api_key: "not-needed"
-  model: "llama3"
-  base_url: "http://localhost:11434"
-  ```
 
 ### 浏览器配置 (`browser` 段)
 
