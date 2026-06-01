@@ -8,7 +8,7 @@ llm:
   provider: openai
 
   # API 密钥（必填）
-  api_key: "sk-03dd531ed2c94ea38a9ccbc73902dd7f"
+  api_key: ""
 
   # 模型名称
   model: "deepseek-v4-flash"

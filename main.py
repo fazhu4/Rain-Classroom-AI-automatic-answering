@@ -4,12 +4,11 @@
 通过 CDP 直连浏览器 → 注入JS提取DOM题目 → 分题型构建LLM提示词 → 大模型作答 → 浏览器内点击
 """
 import sys
+import re
 import asyncio
 import yaml
 from pathlib import Path
 from typing import Optional
-
-from sympy.parsing.sympy_parser import null
 
 from llm_client import LLMClient
 
@@ -29,9 +28,16 @@ class AutoAnswer:
         Args:
             config_path: YAML配置文件路径，默认取本脚本同目录下的 config.yaml
         """
-        # 未指定路径时默认使用脚本同目录下的 config.yaml
+        # 未指定路径时自动推断：PyInstaller frozen 模式取 exe 同目录，开发模式取脚本同目录
         if config_path is None:
-            config_path = Path(__file__).parent / "config.yaml"
+            if getattr(sys, 'frozen', False):
+                # PyInstaller 打包后 sys.executable 是 exe 路径，config.yaml 应放在同目录
+                config_path = Path(sys.executable).parent / "config.yaml"
+            else:
+                # 开发模式：脚本同目录
+                config_path = Path(__file__).parent / "config.yaml"
+        # 保存配置路径，后续写回 API Key 时需要
+        self._config_path = config_path
         # 加载并解析YAML配置
         self.config = self._load_config(config_path)
         # 创建大模型客户端，传入 llm 配置段
@@ -39,23 +45,61 @@ class AutoAnswer:
         # 从 automation 段读取点击后延迟秒数，默认0.5秒
         self.click_delay = self.config["automation"].get("click_delay", 0.5)
 
-    # 安全加载YAML配置文件，返回解析后的字典
+    # 安全加载YAML配置文件，如果文件不存在则打印友好提示
+    # Args:
+    #     path: 配置文件路径
+    # Returns: 解析后的配置字典
     def _load_config(self, path: str) -> dict:
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            # PyInstaller 打包后文件可能被移走，打印当前所需路径供排查
+            print(f"[!] 找不到配置文件: {path}")
+            print(f"    请确保 config.yaml 与 {Path(sys.executable).name} 放在同一个文件夹中")
+            sys.exit(1)
 
     # ==================== 程序入口 ====================
 
-    # 主入口：校验API Key有效性，然后启动浏览器模式
+    # 主入口：校验 API Key，首次使用自动提示输入，然后启动浏览器模式
     def run(self):
         # 读取 api_key 字段，检查是否填写了有效的 Key
         api_key = self.config["llm"].get("api_key", "")
-        if api_key  is null:
-            print("[!] 请先在 config.yaml 中填入你的 API Key")
-            sys.exit(1)  # 未配置Key直接退出
+        if not api_key:
+            # 首次使用：无需用户手动编辑配置文件，直接在控制台粘贴 Key
+            print("=" * 50)
+            print("  首次使用：请先获取 API Key")
+            print("  推荐 DeepSeek：https://platform.deepseek.com")
+            print("  注册后在 API Keys 页面创建 Key 并复制")
+            print("=" * 50)
+            # 等待用户粘贴 API Key
+            api_key = input("\n请输入你的 API Key（右键粘贴后按回车）: ").strip()
+            if not api_key:
+                # 用户直接回车跳过，视为放弃
+                print("[!] 未输入 API Key，程序退出")
+                sys.exit(1)
+            # 将 Key 写回 config.yaml，下次启动无需再输
+            self._save_api_key(api_key)
+            # 更新内存中的配置
+            self.config["llm"]["api_key"] = api_key
+            # 用新 Key 重建 LLM 客户端
+            self.llm = LLMClient(self.config["llm"])
+            print("[+] API Key 已保存，下次启动无需再输\n")
 
         # 当前仅支持浏览器模式，直接启动
         self._run_browser_mode()
+
+    # 将用户输入的 API Key 写回 config.yaml 文件（用正则替换避免破坏注释和格式）
+    # Args:
+    #     api_key: 用户粘贴的 API Key 字符串
+    def _save_api_key(self, api_key: str):
+        with open(self._config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        # 匹配 api_key: "任意内容" 或 api_key: ''，替换为新的 Key
+        content = re.sub(r'(api_key:\s*")[^"]*(")', f'\\1{api_key}\\2', content)
+        content = re.sub(r"(api_key:\s*')[^']*(')", f'\\1{api_key}\\2', content)
+        with open(self._config_path, "w", encoding="utf-8") as f:
+            f.write(content)
 
     # 初始化 BrowserController，打印启动横幅，并通过 asyncio.run() 启动异步答题循环
     def _run_browser_mode(self):
@@ -95,13 +139,18 @@ class AutoAnswer:
             print(f"[!] 连接失败: {e}")
             browser_type = self.config.get("browser", {}).get("browser_type", "edge")
             exe = "msedge.exe" if browser_type == "edge" else "chrome.exe"
+            # frozen 模式下显示 exe 文件名，开发模式下显示 python 命令
+            if getattr(sys, 'frozen', False):
+                rerun_cmd = Path(sys.executable).name
+            else:
+                rerun_cmd = f"python {Path(__file__).name}"
             print(f"""
 请按以下步骤操作:
   1. 完全关闭所有 {browser_type.upper()} 窗口
   2. 打开任务管理器，确认没有残留进程，有就结束掉
   3. Win+R 运行: {exe} --remote-debugging-port=9222
   4. 在浏览器中打开考试页面并登录
-  5. 重新运行: python main.py
+  5. 重新运行: {rerun_cmd}
 """)
             return  # 连接失败直接退出
 
