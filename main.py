@@ -6,6 +6,8 @@
 import sys
 import re
 import asyncio
+from asyncio.windows_events import NULL
+
 import yaml
 from pathlib import Path
 from typing import Optional
@@ -22,14 +24,10 @@ class AutoAnswer:
     # 所有题型共用的大模型返回格式提示，避免在三个builder中重复
     _JSON_FORMAT_HINT = '请以 JSON 格式返回答案（只返回 JSON，不要其他内容）：'
 
-    def __init__(self, config_path: Optional[str] = None):
-        """
-        加载配置文件，创建 LLM 客户端，读取自动化参数
-        Args:
-            config_path: YAML配置文件路径，默认取本脚本同目录下的 config.yaml
-        """
+    def __init__(self ):
+        self.config_path = None
         # 未指定路径时自动推断：PyInstaller frozen 模式取 exe 同目录，开发模式取脚本同目录
-        if config_path is None:
+        if self.config_path is None:
             if getattr(sys, 'frozen', False):
                 # PyInstaller 打包后 sys.executable 是 exe 路径，config.yaml 应放在同目录
                 config_path = Path(sys.executable).parent / "config.yaml"
@@ -326,6 +324,6 @@ class AutoAnswer:
 
 if __name__ == "__main__":
     # 从命令行参数读取配置文件路径（可选）
-    config_path = sys.argv[1] if len(sys.argv) > 1 else None
-    app = AutoAnswer(config_path)
+
+    app = AutoAnswer()
     app.run()
